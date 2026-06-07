@@ -1,83 +1,149 @@
 ---
 name: zarpa-clickup-ops
 description: >
-  Operational skill for the Zarpa Copywriter agent in Claude Routines. Use FIRST
-  on every task — explains how to receive a ClickUp webhook payload, parse the brief,
-  identify content type from tags, and save results back without erasing the original brief.
-  Contains the full ClickUp workspace map (IDs, tag meanings, status workflow).
+  Operational guide for Zarpa content agents (Research Routine + Writing Routine).
+  Load FIRST on every task — before any other skill.
+  CRITICAL GOTCHAS: write_now = custom field checkbox (NOT a tag);
+  save content by appending to description (NOT comments, NOT overwrite);
+  final status = "check and correction" (NOT "in progress").
+  Contains: workspace map with all 4 list IDs, all custom field IDs,
+  two-agent workflow, content type routing, Quill Delta parser, status workflow.
 ---
 
-# zarpa-clickup-ops — Operational Guide for the Zarpa Copywriter
+# zarpa-clickup-ops — Операційний гід для агентів Zarpa
 
-Read this skill every time before starting work on a content task.
+Читай цей Skill ПЕРШИМ перед будь-якою іншою дією.
 
 ---
 
-## 1. Webhook Trigger — What You Receive
+## ⚠️ GOTCHAS — Прочитай перед усім іншим
 
-When ClickUp Automation fires (tag `write now` added), you receive:
-- `task_id` — ClickUp task ID (e.g. `869d5rfj5`)
-- optionally: `task_name`, `list_id`, `tags`
+Ці факти не очевидні і викликають збої якщо їх пропустити:
 
-First action: **fetch the full task**
+1. **`write now` — це CUSTOM FIELD (чекбокс), НЕ тег.**
+   ID: `3eb51e48-1787-4146-b84f-eac2fffb65b2`
+   Встановлюється через `clickup_update_task` з параметром `custom_fields`.
+   Теги не використовуються для тригерування агентів у цьому pipeline.
+
+2. **Весь контент (дослідження + текст) APPENDING до description таску.**
+   Ніколи не перезаписуй description. Ніколи не пиши в коментарі (comments).
+   Читай поточний опис → додай новий блок в кінці → збережи повний опис.
+
+3. **Статус після написання тексту = `check and correction`**, не "in progress", не "review".
+
+4. **Сторінки "Ми лікуємо" (list `901218584743`) → zarpa-page-writer We Treat Mode.**
+   Це НЕ landing page і НЕ marketing page. Окрема структура для хвороб/станів.
+
+5. **Research Routine і Writing Routine — два окремих агенти з різними тригерами.**
+   Research Routine закінчує роботу, встановлюючи `write now = true` → це тригер для Writing Routine.
+
+6. **ClickUp зберігає опис як Quill Delta JSON** — перетворюй у plain text перед читанням.
+
+---
+
+## 1. Two-Agent Workflow
+
+```
+RESEARCH ROUTINE (Claude Sonnet)
+─────────────────────────────────
+Тригер: статус таску змінюється на "seo research"
+        АБО custom field research_started = true
+Читає:  zarpa-seo-researcher (цей Skill завантажує Research Routine)
+Робить: 15-25 запитів WebSearch + Apify, семантичне ядро, аналіз конкурентів
+Зберігає: додає "## 🔍 SEO Research" блок до description таску
+Завершує: статус → "writing text"
+          custom field write_now (ID: 3eb51e48-1787-4146-b84f-eac2fffb65b2) = true
+
+           ↓ ClickUp Automation фіксує зміну write_now → Webhook
+
+WRITING ROUTINE (Claude Opus)
+─────────────────────────────
+Тригер: custom field write_now = true (через ClickUp Automation Webhook)
+Читає:  zarpa-brand-voice + zarpa-seo-aeo-framework + zarpa-page-writer (або zarpa-blog-writer)
+        Читає task description — там є "## 🔍 SEO Research" блок від Research Routine
+Робить: Пише повний SEO/AEO текст на основі дослідження
+Зберігає: додає "## ✍️ Текст сторінки" блок до description таску
+           заповнює custom field img_prompt (ID: 07c498a0-9985-44c3-bcdd-5ba0a40b16be)
+Завершує: статус → "check and correction"
+          write_now → false (скидання для можливого повторного запуску)
+```
+
+---
+
+## 2. Отримання Таску
+
+При будь-якому тригері — перша дія завжди:
 ```
 clickup_get_task(task_id="<id>", detail_level="detailed")
 ```
-If too large, retry with `detail_level="summary"`.
+Якщо відповідь занадто велика — спробуй `detail_level="summary"`.
+
+З відповіді витягни:
+- `description` — Quill Delta JSON, розпарсити (секція 5)
+- `status.status` — поточний статус
+- `list.id` — визначає тип контенту (секція 4)
+- `custom_fields` — поточні значення полів
 
 ---
 
-## 2. Workspace Map
+## 3. Workspace Map — Усі Lists
 
 ### Content Lists
-| List name | List ID | Content type |
-|-----------|---------|--------------|
-| zarpa io | `901211514850` | Blog articles + service pages |
-| Контент | `901213337774` | Social media posts |
+| Назва списку | List ID | Тип контенту | Writing Skill |
+|-------------|---------|--------------|---------------|
+| Статичні маркетингові сторінки | `901211514850` | Service/landing pages | zarpa-page-writer (Landing Mode або Marketing Mode) |
+| Сторінки "Ми лікуємо" | `901218584743` | Сторінки хвороб/станів | zarpa-page-writer **(We Treat Mode)** |
+| Сторінки блогу | `901218632544` | Блог-статті | zarpa-blog-writer |
+| SEO AEO перевірка ефективності | `901215378522` | Моніторинг (read-only) | — |
 
 ### Reference Lists
-| List name | List ID | Use for |
-|-----------|---------|---------|
-| Stuff | `901211025182` | Specialist names/credentials (E-E-A-T) |
-| SEO AEO ZARPA | `901215378522` | Keyword strategy materials |
-| Google search console | `901215702849` | Organic traffic data |
+| Назва списку | List ID | Призначення |
+|-------------|---------|-------------|
+| Stuff | `901211025182` | Імена спеціалістів, кваліфікація (для E-E-A-T) |
+| Google search console | `901215702849` | Дані органічного трафіку |
+
+**Workspace ID:** `9012154420`
 
 ---
 
-## 3. Tag System
+## 4. Routing: Якого Writing Skill завантажувати
 
-| Tag | Meaning |
-|-----|---------|
-| `write now` | Trigger — generate content |
-| `blog` | Blog article → use zarpa-blog-writer |
-| `lending` | Service/landing page → use zarpa-page-writer |
-| `marketing` | Marketing page → use zarpa-page-writer (marketing mode) |
-| `img` | Generate cover image — skip if absent |
-| `send to discord` | Handled by n8n separately — ignore |
-| `draft` | Sparse brief — use judgment to fill gaps |
-
-**Decision logic:**
 ```
-blog tag       → zarpa-blog-writer
-lending tag    → zarpa-page-writer
-marketing tag  → zarpa-page-writer (marketing mode)
-Контент list   → zarpa-social-writer
-no type tag    → infer from task name prefix (📝 [БЛОГ] etc.) or default to blog
+List ID 901218584743  →  zarpa-page-writer We Treat Mode   ← "Ми лікуємо"
+List ID 901218632544  →  zarpa-blog-writer                 ← Блог
+List ID 901211514850:
+  тег lending         →  zarpa-page-writer Landing Mode
+  тег marketing       →  zarpa-page-writer Marketing Mode
+  немає тегу          →  інферуй з назви: [БЛОГ] → blog, [СТОРІНКА] → landing
 ```
 
 ---
 
-## 4. Parsing the Task Description (Quill Delta)
+## 5. Custom Fields — Повна Таблиця
 
-ClickUp stores rich text as Quill Delta JSON: `{"ops": [...]}`.
+| Field | ID | Тип | Хто встановлює | Значення |
+|-------|-----|-----|----------------|---------|
+| `write now` | `3eb51e48-1787-4146-b84f-eac2fffb65b2` | Checkbox | Research Routine (true) / Writing Routine (reset false) | Тригер Writing Routine |
+| `img_prompt` | `07c498a0-9985-44c3-bcdd-5ba0a40b16be` | Text | Writing Routine | Інструкції Google Flow для Hero + секцій |
+| `image_name` | — | Text | Юра вручну | Назви файлів зображень у репо |
+| `creating_a_page` | — | Text | Агент при зміні статусу | Передача даних агенту генерації сторінки |
+| `start_research` | — | DateTime | Юра вручну | Час початку дослідження |
+| `research_started` | — | Checkbox | ClickUp Automation | Тригер Research Routine |
 
-Each op is either:
-- `{"insert": "text"}` → plain text, include it
-- `{"insert": "text", "attributes": {...}}` → include text, ignore attributes
-- `{"insert": {"divider": true}}` → skip
-- `{"insert": {"table-embed": {...}}}` → parse as table (see below)
+**Як встановити custom field через API:**
+```
+clickup_update_task(
+  task_id="<id>",
+  custom_fields=[{"id": "3eb51e48-1787-4146-b84f-eac2fffb65b2", "value": true}]
+)
+```
 
-**Python extraction:**
+---
+
+## 6. Парсинг Description (Quill Delta)
+
+ClickUp зберігає rich text як Quill Delta JSON: `{"ops": [...]}`.
+
 ```python
 import json
 
@@ -89,89 +155,121 @@ def quill_to_text(quill_json_string):
         if isinstance(insert, str):
             result.append(insert)
         elif isinstance(insert, dict) and "table-embed" in insert:
-            result.append(parse_table(insert["table-embed"]))
-    return "".join(result)
-
-def parse_table(table_data):
-    cells = table_data.get("cells", {})
-    rows = table_data.get("rows", [])
-    cols = table_data.get("columns", [])
-    lines = []
-    for r_idx in range(1, len(rows)+1):
-        row_cells = []
-        for c_idx in range(1, len(cols)+1):
-            key = f"{r_idx}:{c_idx}"
-            cell = cells.get(key, {})
-            cell_text = "".join(
-                op.get("insert","") for op in cell.get("content",[])
-                if isinstance(op.get("insert",""), str)
-            ).strip()
-            row_cells.append(cell_text)
-        lines.append(" | ".join(row_cells))
-    return "\n".join(lines) + "\n"
+            rows = insert["table-embed"].get("rows", [])
+            cols = insert["table-embed"].get("columns", [])
+            cells = insert["table-embed"].get("cells", {})
+            for r in range(1, len(rows)+1):
+                row = []
+                for c in range(1, len(cols)+1):
+                    cell = cells.get(f"{r}:{c}", {})
+                    text = "".join(
+                        op.get("insert","") for op in cell.get("content",[])
+                        if isinstance(op.get("insert",""), str)
+                    ).strip()
+                    row.append(text)
+                result.append(" | ".join(row))
+    return "\n".join(result) if isinstance(result[0], str) else "\n".join(
+        [r if isinstance(r, str) else r for r in result]
+    )
 ```
 
-**Key sections to extract from the brief:**
+Якщо description вже plain text (не JSON) — використовуй безпосередньо.
 
-| Section heading | Contains |
-|----------------|----------|
-| Мета | Goal of the piece |
-| URL | Target slug (e.g. zarpa.io/blog/shrot-terapiya) |
-| Ключові слова / Семантичне ядро | Keywords, search intent, priority |
-| Конкуренти | Competitor gaps to exploit |
-| Обсяг та структура | Word count + section outline |
-| Автор | Author name for E-E-A-T |
+**Секції, які шукати в description:**
+
+| Розділ | Що містить |
+|--------|-----------|
+| `## 🔍 SEO Research` | Дослідження від Research Routine — Writing Routine читає це |
+| Ключові слова / Семантичне ядро | Ключові слова, пошуковий інтент |
+| Конкуренти | Аналіз конкурентів для контентних пробілів |
+| Обсяг та структура | Кількість слів + структура секцій |
+| Автор | Ім'я для E-E-A-T |
+| URL / slug | Цільовий URL сторінки |
 
 ---
 
-## 5. Saving Content Back
+## 7. Збереження Контенту — Append до Description
 
-**Always save as a comment — never overwrite the task description.**
+**Правило:** append новий блок, зберігай весь попередній вміст.
 
+```python
+# 1. Отримай поточний опис
+task = clickup_get_task(task_id="<id>")
+current_desc = parse_description(task)  # перетвори Quill Delta у plain text
+
+# 2. Додай новий блок
+new_content = current_desc.rstrip() + "\n\n---\n\n## [NEW BLOCK]\n\n[content]"
+
+# 3. Збережи
+clickup_update_task(task_id="<id>", description=new_content)
 ```
-clickup_create_task_comment(task_id="<id>", comment_text="<content>")
-clickup_update_task(task_id="<id>", status="in progress")
-```
 
-**Comment format:**
+**Формат блоку від Research Routine:**
 ```markdown
-## ✍️ Згенерований контент — [тип]
+## 🔍 SEO Research
 
+**Дата:** YYYY-MM-DD
+**Тема:** [назва сторінки]
+
+### Семантичне ядро
+[таблиця ключових слів з частотністю та інтентом]
+
+### Аналіз конкурентів
+[структури сторінок конкурентів, контентні пробіли]
+
+### Рекомендована структура сторінки
+[H1, H2 секції, FAQ теми]
+
+### Додаткові інсайти
+[What People Ask, пов'язані теми, питання пацієнтів]
+```
+
+**Формат блоку від Writing Routine:**
+```markdown
+## ✍️ Текст сторінки
+
+> Тип: [we-treat / blog / landing / marketing]
 > Автор: [ім'я або "Команда Zarpa"]
-> Тип: [blog / lending / marketing / social]
-> Дата: [YYYY-MM-DD]
+> Дата: YYYY-MM-DD
 
 ---
 
-[повний текст]
+[повний текст сторінки]
 
 ---
 
-**SEO Title:** [до 60 символів]
+**SEO Title:** [до 60 символів, ключове слово + "Львів"]
 **Meta Description:** [до 155 символів]
+
+### img_prompt (Google Flow)
+Hero: [опис 3D персонажу у стилі Zarpa для Hero секції]
+[Додаткові секції якщо потрібно]
 ```
 
 ---
 
-## 6. Checklist Before Writing
+## 8. Статус Workflow
 
-- [ ] Task fetched via clickup_get_task
-- [ ] Quill Delta parsed, brief extracted
-- [ ] Content type identified from tags or list
-- [ ] Target URL found
-- [ ] Keywords extracted
-- [ ] Section structure identified
-- [ ] Author identified (or defaulted to "Команда Zarpa")
-- [ ] Correct writing skill loaded
+| Статус | Хто встановлює | Що відбувається |
+|--------|---------------|----------------|
+| `seo research` | Юра або ClickUp Automation | Research Routine запускається |
+| `writing text` | Research Routine | Writing Routine чекає тригер write_now |
+| `check and correction` | Writing Routine | Юра перевіряє контент, вносить правки |
+| `creating a page` | Юра | Агент генерації Next.js сторінки |
+| `correction` | Юра | Ручне виправлення дизайну |
+| `ai checks` | Автоматично | SEO/AEO верифікація |
+| `ready to publish` | Після ai checks | Схвалено до публікації |
+| `published` | Після merge + deploy | Живе на zarpa.io |
 
 ---
 
-## 7. Error Handling
+## 9. Error Handling
 
-| Situation | Action |
-|-----------|--------|
-| No type tag (blog/lending/marketing) | Infer from task name prefix or list |
-| Empty description | Write from task name alone |
-| Author not found in Stuff list | Use "Команда Zarpa", add note |
-| Task in Контент, no format specified | Default to Instagram post |
-| Quill Delta table unreadable | Extract keywords from H2 headings instead |
+| Ситуація | Дія |
+|----------|-----|
+| Description — Quill Delta JSON | Парсити через quill_to_text() |
+| Description — plain text | Використовувати напряму |
+| Тип контенту не визначається з тегів | Визначати за List ID (секція 4) |
+| Автор не знайдений у Stuff list | Використати "Команда Zarpa" |
+| Запис custom field не вдається | Повторити 1 раз; якщо знову помилка — залишити нотатку в description |
+| Description занадто великий | Спочатку Research блок → потім Writing блок окремим оновленням |
